@@ -16,7 +16,7 @@
 
 namespace {
 constexpr uint8_t DATA_PIN = 2;
-constexpr uint16_t LEDS_PER_ZONE = 14;
+constexpr uint16_t LEDS_PER_ZONE = 1;
 constexpr uint8_t NUM_STRIPS = 18;
 constexpr uint8_t DEFAULT_BRIGHTNESS = 128;
 constexpr float DEFAULT_SPEED = 1.0f;
@@ -27,6 +27,8 @@ constexpr uint8_t SNAKE_FADE = 32;
 constexpr uint32_t WIFI_CONNECT_TIMEOUT_MS = 15000;
 constexpr uint32_t WIFI_RETRY_INTERVAL_MS = 30000;
 constexpr char OTA_HOSTNAME[] = "led-strip-wall";
+constexpr uint32_t FRAME_INTERVAL_MS = 1000 / 120; // target ~120 FPS
+constexpr bool COLOR_INPUT_IS_GRB = true;
 
 struct StripDescriptor {
   uint16_t startZone;    // Zone index in data order
@@ -84,6 +86,7 @@ uint8_t globalBrightness = DEFAULT_BRIGHTNESS;
 float speedMultiplier = DEFAULT_SPEED;
 StripRuntime stripState[NUM_STRIPS];
 uint32_t lastFrameMillis = 0;
+uint32_t frameAccumulator = 0;
 String serialBuffer;
 bool wifiConnected = false;
 bool otaReady = false;
@@ -311,7 +314,11 @@ void setColorFromTokens(const String tokens[], uint8_t count) {
     Serial.println(F("Color values must be 0-255"));
     return;
   }
-  masterColor = CRGB(r, g, b);
+  if constexpr (COLOR_INPUT_IS_GRB) {
+    masterColor = CRGB(g, r, b);
+  } else {
+    masterColor = CRGB(r, g, b);
+  }
   Serial.print(F("Color updated to "));
   Serial.print(r);
   Serial.print(F(","));
@@ -518,8 +525,12 @@ void loop() {
   const uint32_t delta = now - lastFrameMillis;
   lastFrameMillis = now;
   maintainWiFiAndOTA(now);
-  const float deltaSeconds = static_cast<float>(delta) / 1000.0f;
-  updateEffect(deltaSeconds);
-  flushZonesToPhysical();
-  FastLED.show();
+  frameAccumulator += delta;
+  if (frameAccumulator >= FRAME_INTERVAL_MS) {
+    const float deltaSeconds = static_cast<float>(frameAccumulator) / 1000.0f;
+    frameAccumulator = 0;
+    updateEffect(deltaSeconds);
+    flushZonesToPhysical();
+    FastLED.show();
+  }
 }
