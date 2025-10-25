@@ -110,7 +110,7 @@ bool heartbeatState = false;
 float breathingPhase = 0.0f; // normalized 0-1 phase
 constexpr uint32_t BREATH_PERIOD_MS = 3000;
 constexpr float BREATH_PERIOD_SECONDS = BREATH_PERIOD_MS / 1000.0f;
-constexpr uint8_t BREATH_MIN_LEVEL = 20; // avoid flicker near zero PWM
+constexpr uint8_t BREATH_MIN_LEVEL = 50; // avoid flicker near zero PWM
 
 bool connectWiFi();
 void configureOTA();
@@ -254,12 +254,14 @@ void updateBreathing(float deltaSeconds) {
     breathingPhase -= static_cast<uint32_t>(breathingPhase);
   }
   const uint8_t phaseByte = static_cast<uint8_t>(breathingPhase * 255.0f);
-  const uint8_t wave = sin8(phaseByte);
-  uint8_t level = scale8(wave, globalBrightness);
-  if (level > 0 && level < BREATH_MIN_LEVEL) {
-    level = BREATH_MIN_LEVEL;
+  uint8_t minCap = BREATH_MIN_LEVEL;
+  if (globalBrightness <= BREATH_MIN_LEVEL) {
+    pendingBrightness = globalBrightness;
+  } else {
+    const uint8_t wave = sin8(phaseByte); // 0-255
+    const uint8_t range = globalBrightness - minCap;
+    pendingBrightness = static_cast<uint8_t>((static_cast<uint16_t>(range) * wave) / 255U + minCap);
   }
-  pendingBrightness = level;
   for (uint16_t zone = 0; zone < TOTAL_ZONES; ++zone) {
     zoneBuffer[zone] = masterColor;
   }
