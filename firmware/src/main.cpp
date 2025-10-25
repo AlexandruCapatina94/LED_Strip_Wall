@@ -1,7 +1,18 @@
 #include <Arduino.h>
 #include <ArduinoOTA.h>
 #include <FastLED.h>
+#include <WiFi.h>
 #include <stdlib.h>
+
+#include "wifi_credentials.h"
+
+#ifndef WIFI_SSID
+#error "Define WIFI_SSID in wifi_credentials.h"
+#endif
+
+#ifndef WIFI_PASSWORD
+#error "Define WIFI_PASSWORD in wifi_credentials.h"
+#endif
 
 namespace {
 constexpr uint8_t DATA_PIN = 2;
@@ -81,6 +92,30 @@ uint32_t lastWifiAttemptMillis = 0;
 void configureOTA();
 bool attemptWiFiConnection();
 void maintainWiFiAndOTA(uint32_t now);
+
+// Verbose Wi-Fi event logging for diagnostics
+void onWiFiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
+  Serial.print(F("[WiFi-event] "));
+  Serial.println(static_cast<int>(event));
+  switch (event) {
+  case ARDUINO_EVENT_WIFI_STA_START:
+    Serial.println(F("STA start"));
+    break;
+  case ARDUINO_EVENT_WIFI_STA_CONNECTED:
+    Serial.println(F("STA connected to AP"));
+    break;
+  case ARDUINO_EVENT_WIFI_STA_GOT_IP:
+    Serial.print(F("Got IP: "));
+    Serial.println(WiFi.localIP());
+    break;
+  case ARDUINO_EVENT_WIFI_STA_DISCONNECTED:
+    Serial.print(F("STA disconnected, reason: "));
+    Serial.println(info.wifi_sta_disconnected.reason);
+    break;
+  default:
+    break;
+  }
+}
 
 uint16_t logicalToZoneIndex(uint8_t stripIndex, uint16_t logicalIndex) {
   const StripDescriptor &strip = STRIPS[stripIndex];
@@ -463,6 +498,8 @@ void maintainWiFiAndOTA(uint32_t now) {
 void setup() {
   Serial.begin(115200);
   delay(200);
+  // Attach Wi-Fi event logger early
+  WiFi.onEvent(onWiFiEvent);
   FastLED.addLeds<WS2811, DATA_PIN, GRB>(leds, TOTAL_LEDS);
   FastLED.setBrightness(globalBrightness);
   clearZones();
