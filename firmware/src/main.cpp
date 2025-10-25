@@ -1,9 +1,7 @@
 #include <Arduino.h>
 #include <ArduinoOTA.h>
 #include <FastLED.h>
-#include <WiFi.h>
-
-#include "WiFiCredentials.h"
+#include <stdlib.h>
 
 namespace {
 constexpr uint8_t DATA_PIN = 2;
@@ -244,8 +242,12 @@ void setEffectFromToken(const String &token) {
 }
 
 bool parseUInt8(const String &token, uint8_t &value) {
-  long parsed = token.toInt();
-  if (parsed < 0 || parsed > 255) {
+  if (token.length() == 0) {
+    return false;
+  }
+  char *end = nullptr;
+  const long parsed = strtol(token.c_str(), &end, 10);
+  if (end == token.c_str() || *end != '\0' || parsed < 0 || parsed > 255) {
     return false;
   }
   value = static_cast<uint8_t>(parsed);
@@ -253,7 +255,14 @@ bool parseUInt8(const String &token, uint8_t &value) {
 }
 
 bool parseFloat(const String &token, float &value) {
-  value = token.toFloat();
+  if (token.length() == 0) {
+    return false;
+  }
+  char *end = nullptr;
+  value = strtof(token.c_str(), &end);
+  if (end == token.c_str() || *end != '\0') {
+    return false;
+  }
   return true;
 }
 
@@ -327,13 +336,15 @@ void handleCommand(const String &line) {
       Serial.println(F("Usage: speed <multiplier>"));
     } else {
       float value;
-      if (parseFloat(tokens[1], value) && value > 0.0f) {
+      if (!parseFloat(tokens[1], value)) {
+        Serial.println(F("Speed must be a number"));
+      } else if (value <= 0.0f) {
+        Serial.println(F("Speed must be positive"));
+      } else {
         speedMultiplier = value;
         resetRuntimeState();
         Serial.print(F("Speed multiplier set to "));
         Serial.println(speedMultiplier, 3);
-      } else {
-        Serial.println(F("Speed must be positive"));
       }
     }
   } else if (command.equalsIgnoreCase(F("status"))) {
