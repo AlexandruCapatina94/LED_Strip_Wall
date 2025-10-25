@@ -1,4 +1,5 @@
 #include <Arduino.h>
+#include <ArduinoOTA.h>
 #include <FastLED.h>
 #include <stdlib.h>
 
@@ -12,6 +13,9 @@ constexpr uint8_t RAIN_TRAIL = 6;
 constexpr uint8_t RAIN_FADE = 48;
 constexpr uint8_t SNAKE_LENGTH = 12;
 constexpr uint8_t SNAKE_FADE = 32;
+constexpr uint32_t WIFI_CONNECT_TIMEOUT_MS = 15000;
+constexpr uint32_t WIFI_RETRY_INTERVAL_MS = 30000;
+constexpr char OTA_HOSTNAME[] = "led-strip-wall";
 
 struct StripDescriptor {
   uint16_t startZone;    // Zone index in data order
@@ -70,6 +74,13 @@ float speedMultiplier = DEFAULT_SPEED;
 StripRuntime stripState[NUM_STRIPS];
 uint32_t lastFrameMillis = 0;
 String serialBuffer;
+bool wifiConnected = false;
+bool otaReady = false;
+uint32_t lastWifiAttemptMillis = 0;
+
+void configureOTA();
+bool attemptWiFiConnection();
+void maintainWiFiAndOTA(uint32_t now);
 
 uint16_t logicalToZoneIndex(uint8_t stripIndex, uint16_t logicalIndex) {
   const StripDescriptor &strip = STRIPS[stripIndex];
@@ -371,6 +382,82 @@ void handleSerialInput() {
   }
 }
 
+bool attemptWiFiConnection() {
+  Serial.print(F("Connecting to WiFi SSID '"));
+  Serial.print(WIFI_SSID);
+  Serial.println(F("'"));
+  WiFi.mode(WIFI_STA);
+  WiFi.persistent(false);
+  WiFi.setHostname(OTA_HOSTNAME);
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  const uint32_t start = millis();
+  while (WiFi.status() != WL_CONNECTED && (millis() - start) < WIFI_CONNECT_TIMEOUT_MS) {
+    delay(500);
+    Serial.print(F("."));
+  }
+  Serial.println();
+  wifiConnected = WiFi.status() == WL_CONNECTED;
+  if (wifiConnected) {
+    Serial.println(F("WiFi connected."));
+    Serial.print(F("IP address: "));
+    Serial.println(WiFi.localIP());
+    lastWifiAttemptMillis = millis();
+    return true;
+  }
+  Serial.println(F("Failed to connect to WiFi. OTA updates disabled until retry."));
+  WiFi.disconnect(true);
+  lastWifiAttemptMillis = millis();
+  return false;
+}
+
+void configureOTA() {
+  ArduinoOTA.setHostname(OTA_HOSTNAME);
+  ArduinoOTA.onStart([]() { Serial.println(F("OTA update started.")); });
+  ArduinoOTA.onEnd([]() { Serial.println(F("OTA update finished.")); });
+  ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
+    const unsigned int percent = (total == 0) ? 0U : (progress * 100U) / total;
+    Serial.print(F("OTA progress: "));
+    Serial.print(percent);
+    Serial.println(F("%"));
+  });
+  ArduinoOTA.onError([](ota_error_t error) {
+    Serial.print(F("OTA error: "));
+    Serial.println(static_cast<uint8_t>(error));
+  });
+  ArduinoOTA.begin();
+  Serial.print(F("OTA ready. Hostname: "));
+  Serial.println(OTA_HOSTNAME);
+  otaReady = true;
+}
+
+void maintainWiFiAndOTA(uint32_t now) {
+  if (WiFi.status() == WL_CONNECTED) {
+    if (!wifiConnected) {
+      wifiConnected = true;
+      Serial.println(F("WiFi reconnected."));
+      Serial.print(F("IP address: "));
+      Serial.println(WiFi.localIP());
+    }
+    if (!otaReady) {
+      configureOTA();
+    }
+  } else {
+    if (wifiConnected || otaReady) {
+      wifiConnected = false;
+      otaReady = false;
+      Serial.println(F("WiFi connection lost. OTA paused."));
+    }
+    if (now - lastWifiAttemptMillis >= WIFI_RETRY_INTERVAL_MS) {
+      if (attemptWiFiConnection()) {
+        configureOTA();
+      }
+    }
+  }
+  if (otaReady) {
+    ArduinoOTA.handle();
+  }
+}
+
 } // namespace
 
 void setup() {
@@ -383,6 +470,9 @@ void setup() {
   FastLED.show();
   printStatus();
   lastFrameMillis = millis();
+  if (attemptWiFiConnection()) {
+    configureOTA();
+  }
 }
 
 void loop() {
@@ -390,6 +480,7 @@ void loop() {
   const uint32_t now = millis();
   const uint32_t delta = now - lastFrameMillis;
   lastFrameMillis = now;
+  maintainWiFiAndOTA(now);
   const float deltaSeconds = static_cast<float>(delta) / 1000.0f;
   updateEffect(deltaSeconds);
   flushZonesToPhysical();

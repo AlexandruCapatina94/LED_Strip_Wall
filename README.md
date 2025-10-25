@@ -22,6 +22,21 @@ pio device monitor # open 115200 baud serial console
 
 Dependencies are declared in `platformio.ini`; PlatformIO will fetch FastLED automatically.
 
+### Configure Wi-Fi credentials
+
+Wireless updates require the ESP32-C3 to join your local network. Edit `firmware/src/WiFiCredentials.h` and replace the placeholder SSID/password with your Wi-Fi details before building. The credentials are stored in code for simplicity; if you prefer to keep them out of version control, add the file to `.gitignore` and provide your own copy locally.
+
+### Wireless (OTA) uploads
+
+Once the board boots with valid credentials it will connect to Wi-Fi, announce itself as `led-strip-wall.local`, and enable Arduino OTA updates. After the first wired flash you can push new firmware over the network:
+
+```bash
+cd firmware
+pio run -t upload --upload-protocol espota --upload-port led-strip-wall.local
+```
+
+If mDNS is unavailable on your network, replace `led-strip-wall.local` with the module's IP address as printed on the serial console. The device automatically retries Wi-Fi if the connection drops and reports OTA progress over serial.
+
 ## Serial console commands
 
 After flashing, open a serial terminal at 115200 baud. The firmware accepts the following commands:
