@@ -4,6 +4,11 @@
 #include <WiFi.h>
 #include <stdlib.h>
 
+#ifndef WIFI_MAIN_ENABLED
+#define WIFI_MAIN_ENABLED 0
+#endif
+
+#if WIFI_MAIN_ENABLED
 #include "wifi_credentials.h"
 
 #ifndef WIFI_SSID
@@ -13,17 +18,14 @@
 #ifndef WIFI_PASSWORD
 #error "Define WIFI_PASSWORD in wifi_credentials.h"
 #endif
+#endif
 
 namespace {
 constexpr uint8_t DATA_PIN = 2;
 constexpr uint16_t LEDS_PER_ZONE = 1;
 constexpr uint8_t NUM_STRIPS = 18;
 constexpr uint8_t DEFAULT_BRIGHTNESS = 128;
-constexpr float DEFAULT_SPEED = 1.0f;
-constexpr uint8_t RAIN_TRAIL = 6;
-constexpr uint8_t RAIN_FADE = 48;
-constexpr uint8_t SNAKE_LENGTH = 12;
-constexpr uint8_t SNAKE_FADE = 32;
+constexpr float DEFAULT_SPEED = 3.0f;
 constexpr uint32_t WIFI_CONNECT_TIMEOUT_MS = 15000;
 constexpr uint32_t WIFI_RETRY_INTERVAL_MS = 30000;
 constexpr char OTA_HOSTNAME[] = "led-strip-wall";
@@ -37,24 +39,24 @@ struct StripDescriptor {
 };
 
 constexpr StripDescriptor STRIPS[NUM_STRIPS] = {
-    {0, 15, false},   // Strip 0 - 0.5 m
-    {15, 15, true},   // Strip 1 - 0.5 m
-    {30, 15, false},  // Strip 2 - 0.5 m
-    {45, 15, true},   // Strip 3 - 0.5 m
-    {60, 15, false},  // Strip 4 - 0.5 m
-    {75, 15, true},   // Strip 5 - 0.5 m
-    {90, 15, false},  // Strip 6 - 0.5 m
-    {105, 15, true},  // Strip 7 - 0.5 m
-    {120, 36, false}, // Strip 8 - 1.2 m
-    {156, 36, true},  // Strip 9 - 1.2 m
-    {192, 36, false}, // Strip 10 - 1.2 m
-    {228, 45, true},  // Strip 11 - 1.5 m
-    {273, 45, false}, // Strip 12 - 1.5 m
-    {318, 45, true},  // Strip 13 - 1.5 m
-    {363, 45, false}, // Strip 14 - 1.5 m
-    {408, 45, true},  // Strip 15 - 1.5 m
-    {453, 45, false}, // Strip 16 - 1.5 m
-    {498, 45, true},  // Strip 17 - 1.5 m
+    {0, 5, false},    // Strip 0 - 0.5 m
+    {5, 5, true},     // Strip 1 - 0.5 m
+    {10, 5, false},   // Strip 2 - 0.5 m
+    {15, 5, true},    // Strip 3 - 0.5 m
+    {20, 5, false},   // Strip 4 - 0.5 m
+    {25, 5, true},    // Strip 5 - 0.5 m
+    {30, 5, false},   // Strip 6 - 0.5 m
+    {35, 5, true},    // Strip 7 - 0.5 m
+    {40, 12, false},  // Strip 8 - 1.2 m
+    {52, 12, true},   // Strip 9 - 1.2 m
+    {64, 12, false},  // Strip 10 - 1.2 m
+    {76, 15, true},   // Strip 11 - 1.5 m
+    {91, 15, false},  // Strip 12 - 1.5 m
+    {106, 15, true},  // Strip 13 - 1.5 m
+    {121, 15, false}, // Strip 14 - 1.5 m
+    {136, 15, true},  // Strip 15 - 1.5 m
+    {151, 15, false}, // Strip 16 - 1.5 m
+    {166, 15, true},  // Strip 17 - 1.5 m
 };
 
 constexpr uint16_t TOTAL_ZONES = [] {
@@ -72,19 +74,20 @@ CRGB leds[TOTAL_LEDS];
 
 enum class EffectType {
   Solid,
-  Rain,
-  Snake,
+  Rainbow,
+  RainbowGlitter,
+  Confetti,
+  Sinelon,
+  BPM,
+  Juggle,
 };
 
-struct StripRuntime {
-  float accumulator = 0.0f;
-};
-
-EffectType currentEffect = EffectType::Solid;
+EffectType currentEffect = EffectType::Rainbow;
 CRGB masterColor = CRGB::White;
 uint8_t globalBrightness = DEFAULT_BRIGHTNESS;
 float speedMultiplier = DEFAULT_SPEED;
-StripRuntime stripState[NUM_STRIPS];
+uint8_t gHue = 0;
+float hueAccumulator = 0.0f;
 uint32_t lastFrameMillis = 0;
 uint32_t frameAccumulator = 0;
 String serialBuffer;
@@ -129,107 +132,160 @@ uint16_t logicalToZoneIndex(uint8_t stripIndex, uint16_t logicalIndex) {
                         : (strip.startZone + logicalIndex);
 }
 
-void setZoneColor(uint8_t stripIndex, uint16_t logicalIndex, const CRGB &color) {
-  zoneBuffer[logicalToZoneIndex(stripIndex, logicalIndex)] = color;
-}
-
 void clearZones() {
   for (uint16_t i = 0; i < TOTAL_ZONES; ++i) {
     zoneBuffer[i] = CRGB::Black;
   }
 }
 
-void fadeZones(uint8_t amount) {
-  for (uint16_t i = 0; i < TOTAL_ZONES; ++i) {
-    zoneBuffer[i].fadeToBlackBy(amount);
-  }
-}
-
 void flushZonesToPhysical() {
-  for (const StripDescriptor &strip : STRIPS) {
-    const uint32_t stripBaseLED = static_cast<uint32_t>(strip.startZone) * LEDS_PER_ZONE;
-    for (uint16_t zone = 0; zone < strip.zoneCount; ++zone) {
-      const uint16_t zoneIndex = strip.startZone + zone;
-      const CRGB color = zoneBuffer[zoneIndex];
-      const uint32_t ledBase = stripBaseLED + static_cast<uint32_t>(zone) * LEDS_PER_ZONE;
+  uint16_t logicalBase = 0;
+  for (uint8_t stripIndex = 0; stripIndex < NUM_STRIPS; ++stripIndex) {
+    const StripDescriptor &strip = STRIPS[stripIndex];
+    for (uint16_t logical = 0; logical < strip.zoneCount; ++logical) {
+      const uint16_t logicalIndex = logicalBase + logical;
+      if (logicalIndex >= TOTAL_ZONES) {
+        continue;
+      }
+      const uint16_t physicalZone = logicalToZoneIndex(stripIndex, logical);
+      const CRGB color = zoneBuffer[logicalIndex];
+      const uint32_t ledBase =
+          static_cast<uint32_t>(physicalZone) * LEDS_PER_ZONE;
       for (uint8_t led = 0; led < LEDS_PER_ZONE; ++led) {
         leds[ledBase + led] = color;
       }
     }
+    logicalBase += strip.zoneCount;
   }
 }
 
-void updateSolid() {
+void runSolid() {
+  if (TOTAL_ZONES == 0) {
+    return;
+  }
+  fill_solid(zoneBuffer, TOTAL_ZONES, masterColor);
+}
+
+void addGlitter(fract8 chanceOfGlitter) {
+  if (TOTAL_ZONES == 0) {
+    return;
+  }
+  if (random8() < chanceOfGlitter) {
+    const uint16_t index = random16(TOTAL_ZONES);
+    zoneBuffer[index] += CRGB::White;
+  }
+}
+
+void runRainbowCycle() {
+  if (TOTAL_ZONES == 0) {
+    return;
+  }
+  fill_rainbow(zoneBuffer, TOTAL_ZONES, gHue, 7);
+}
+
+void runRainbowWithGlitter() {
+  runRainbowCycle();
+  addGlitter(80);
+}
+
+void runConfetti() {
+  if (TOTAL_ZONES == 0) {
+    return;
+  }
+  fadeToBlackBy(zoneBuffer, TOTAL_ZONES, 10);
+  const uint16_t pos = random16(TOTAL_ZONES);
+  zoneBuffer[pos] += CHSV(gHue + random8(64), 200, 255);
+}
+
+uint8_t scaledBpm(uint8_t baseBpm) {
+  const float scaled = baseBpm * speedMultiplier;
+  if (scaled < 1.0f) {
+    return 1;
+  }
+  if (scaled > 255.0f) {
+    return 255;
+  }
+  return static_cast<uint8_t>(scaled);
+}
+
+void runSinelon() {
+  if (TOTAL_ZONES == 0) {
+    return;
+  }
+  fadeToBlackBy(zoneBuffer, TOTAL_ZONES, 20);
+  const uint16_t pos = beatsin16(scaledBpm(13), 0, TOTAL_ZONES - 1);
+  zoneBuffer[pos] += CHSV(gHue, 255, 192);
+}
+
+void runBpm() {
+  if (TOTAL_ZONES == 0) {
+    return;
+  }
+  const uint8_t beatsPerMinute = scaledBpm(62);
+  const CRGBPalette16 palette = PartyColors_p;
+  const uint8_t beat = beatsin8(beatsPerMinute, 64, 255);
   for (uint16_t i = 0; i < TOTAL_ZONES; ++i) {
-    zoneBuffer[i] = masterColor;
+    zoneBuffer[i] = ColorFromPalette(palette, gHue + (i * 2), beat - gHue + (i * 10));
   }
 }
 
-void updateRain(float deltaSeconds) {
-  fadeZones(RAIN_FADE);
-  const float step = speedMultiplier * deltaSeconds;
-  for (uint8_t stripIndex = 0; stripIndex < NUM_STRIPS; ++stripIndex) {
-    StripRuntime &state = stripState[stripIndex];
-    const uint16_t length = STRIPS[stripIndex].zoneCount;
-    state.accumulator += step * length;
-    while (state.accumulator >= static_cast<float>(length + RAIN_TRAIL)) {
-      state.accumulator -= static_cast<float>(length + RAIN_TRAIL);
-    }
-    int32_t head = static_cast<int32_t>(state.accumulator);
-    for (uint8_t trail = 0; trail < RAIN_TRAIL; ++trail) {
-      int32_t position = head - static_cast<int32_t>(trail);
-      if (position >= 0 && position < length) {
-        CRGB color = masterColor;
-        color.fadeToBlackBy(trail * (255 / RAIN_TRAIL));
-        setZoneColor(stripIndex, static_cast<uint16_t>(position), color);
-      }
-    }
+void runJuggle() {
+  if (TOTAL_ZONES == 0) {
+    return;
+  }
+  fadeToBlackBy(zoneBuffer, TOTAL_ZONES, 20);
+  uint8_t dothue = 0;
+  for (uint8_t i = 0; i < 8; ++i) {
+    const uint16_t pos = beatsin16(scaledBpm(i + 7), 0, TOTAL_ZONES - 1);
+    zoneBuffer[pos] |= CHSV(dothue, 200, 255);
+    dothue += 32;
   }
 }
 
-void updateSnake(float deltaSeconds) {
-  fadeZones(SNAKE_FADE);
-  const float step = speedMultiplier * deltaSeconds;
-  for (uint8_t stripIndex = 0; stripIndex < NUM_STRIPS; ++stripIndex) {
-    StripRuntime &state = stripState[stripIndex];
-    const uint16_t length = STRIPS[stripIndex].zoneCount;
-    state.accumulator += step * length;
-    while (state.accumulator >= static_cast<float>(length)) {
-      state.accumulator -= static_cast<float>(length);
-    }
-    const int32_t head = static_cast<int32_t>(state.accumulator);
-    for (uint8_t segment = 0; segment < SNAKE_LENGTH; ++segment) {
-      int32_t position = head - static_cast<int32_t>(segment);
-      if (position < 0) {
-        position += length;
-      }
-      if (position >= 0 && position < length) {
-        CRGB color = masterColor;
-        color.fadeLightBy(segment * (255 / SNAKE_LENGTH));
-        setZoneColor(stripIndex, static_cast<uint16_t>(position), color);
-      }
-    }
+void advanceHue(float deltaSeconds) {
+  constexpr float HUE_STEPS_PER_SECOND = 40.0f;
+  float increment = speedMultiplier * deltaSeconds * HUE_STEPS_PER_SECOND;
+  if (increment < 0.0f) {
+    increment = 0.0f;
+  }
+  hueAccumulator += increment;
+  while (hueAccumulator >= 1.0f) {
+    gHue += 1;
+    hueAccumulator -= 1.0f;
   }
 }
 
 void updateEffect(float deltaSeconds) {
   switch (currentEffect) {
   case EffectType::Solid:
-    updateSolid();
+    runSolid();
     break;
-  case EffectType::Rain:
-    updateRain(deltaSeconds);
+  case EffectType::Rainbow:
+    runRainbowCycle();
     break;
-  case EffectType::Snake:
-    updateSnake(deltaSeconds);
+  case EffectType::RainbowGlitter:
+    runRainbowWithGlitter();
+    break;
+  case EffectType::Confetti:
+    runConfetti();
+    break;
+  case EffectType::Sinelon:
+    runSinelon();
+    break;
+  case EffectType::BPM:
+    runBpm();
+    break;
+  case EffectType::Juggle:
+    runJuggle();
     break;
   }
+  advanceHue(deltaSeconds);
 }
 
-void resetRuntimeState() {
-  for (auto &state : stripState) {
-    state.accumulator = 0.0f;
-  }
+void resetEffectState() {
+  gHue = 0;
+  hueAccumulator = 0.0f;
+  clearZones();
 }
 
 void printStatus() {
@@ -239,11 +295,23 @@ void printStatus() {
   case EffectType::Solid:
     Serial.println(F("solid"));
     break;
-  case EffectType::Rain:
-    Serial.println(F("rain"));
+  case EffectType::Rainbow:
+    Serial.println(F("rainbow"));
     break;
-  case EffectType::Snake:
-    Serial.println(F("snake"));
+  case EffectType::RainbowGlitter:
+    Serial.println(F("rainbow_glitter"));
+    break;
+  case EffectType::Confetti:
+    Serial.println(F("confetti"));
+    break;
+  case EffectType::Sinelon:
+    Serial.println(F("sinelon"));
+    break;
+  case EffectType::BPM:
+    Serial.println(F("bpm"));
+    break;
+  case EffectType::Juggle:
+    Serial.println(F("juggle"));
     break;
   }
   Serial.print(F("Color (R,G,B): "));
@@ -266,15 +334,23 @@ void printStatus() {
 void setEffectFromToken(const String &token) {
   if (token.equalsIgnoreCase(F("solid"))) {
     currentEffect = EffectType::Solid;
-  } else if (token.equalsIgnoreCase(F("rain"))) {
-    currentEffect = EffectType::Rain;
-  } else if (token.equalsIgnoreCase(F("snake"))) {
-    currentEffect = EffectType::Snake;
+  } else if (token.equalsIgnoreCase(F("rainbow"))) {
+    currentEffect = EffectType::Rainbow;
+  } else if (token.equalsIgnoreCase(F("rainbow_glitter"))) {
+    currentEffect = EffectType::RainbowGlitter;
+  } else if (token.equalsIgnoreCase(F("confetti"))) {
+    currentEffect = EffectType::Confetti;
+  } else if (token.equalsIgnoreCase(F("sinelon"))) {
+    currentEffect = EffectType::Sinelon;
+  } else if (token.equalsIgnoreCase(F("bpm"))) {
+    currentEffect = EffectType::BPM;
+  } else if (token.equalsIgnoreCase(F("juggle"))) {
+    currentEffect = EffectType::Juggle;
   } else {
-    Serial.println(F("Unknown effect. Options: solid, rain, snake"));
+    Serial.println(F("Unknown effect. Options: solid, rainbow, rainbow_glitter, confetti, sinelon, bpm, juggle"));
     return;
   }
-  resetRuntimeState();
+  resetEffectState();
   Serial.print(F("Effect set to "));
   Serial.println(token);
 }
@@ -325,6 +401,11 @@ void setColorFromTokens(const String tokens[], uint8_t count) {
   Serial.print(g);
   Serial.print(F(","));
   Serial.println(b);
+  if (currentEffect == EffectType::Solid) {
+    runSolid();
+    flushZonesToPhysical();
+    FastLED.show();
+  }
 }
 
 void handleCommand(const String &line) {
@@ -353,7 +434,7 @@ void handleCommand(const String &line) {
   const String &command = tokens[0];
   if (command.equalsIgnoreCase(F("effect"))) {
     if (tokenCount < 2) {
-      Serial.println(F("Usage: effect <solid|rain|snake>"));
+      Serial.println(F("Usage: effect <solid|rainbow|rainbow_glitter|confetti|sinelon|bpm|juggle>"));
     } else {
       setEffectFromToken(tokens[1]);
     }
@@ -384,7 +465,7 @@ void handleCommand(const String &line) {
         Serial.println(F("Speed must be positive"));
       } else {
         speedMultiplier = value;
-        resetRuntimeState();
+        resetEffectState();
         Serial.print(F("Speed multiplier set to "));
         Serial.println(speedMultiplier, 3);
       }
@@ -393,7 +474,7 @@ void handleCommand(const String &line) {
     printStatus();
   } else if (command.equalsIgnoreCase(F("help"))) {
     Serial.println(F("Commands:"));
-    Serial.println(F("  effect <solid|rain|snake>"));
+    Serial.println(F("  effect <solid|rainbow|rainbow_glitter|confetti|sinelon|bpm|juggle>"));
     Serial.println(F("  color <r> <g> <b>"));
     Serial.println(F("  brightness <0-255>"));
     Serial.println(F("  speed <multiplier>"));
@@ -425,6 +506,7 @@ void handleSerialInput() {
 }
 
 bool attemptWiFiConnection() {
+#if WIFI_MAIN_ENABLED
   Serial.print(F("Connecting to WiFi SSID '"));
   Serial.print(WIFI_SSID);
   Serial.println(F("'"));
@@ -450,9 +532,16 @@ bool attemptWiFiConnection() {
   WiFi.disconnect(true);
   lastWifiAttemptMillis = millis();
   return false;
+#else
+  Serial.println(F("WiFi disabled in main build. OTA updates unavailable."));
+  wifiConnected = false;
+  otaReady = false;
+  return false;
+#endif
 }
 
 void configureOTA() {
+#if WIFI_MAIN_ENABLED
   ArduinoOTA.setHostname(OTA_HOSTNAME);
   ArduinoOTA.onStart([]() { Serial.println(F("OTA update started.")); });
   ArduinoOTA.onEnd([]() { Serial.println(F("OTA update finished.")); });
@@ -470,9 +559,13 @@ void configureOTA() {
   Serial.print(F("OTA ready. Hostname: "));
   Serial.println(OTA_HOSTNAME);
   otaReady = true;
+#else
+  otaReady = false;
+#endif
 }
 
 void maintainWiFiAndOTA(uint32_t now) {
+#if WIFI_MAIN_ENABLED
   if (WiFi.status() == WL_CONNECTED) {
     if (!wifiConnected) {
       wifiConnected = true;
@@ -498,6 +591,9 @@ void maintainWiFiAndOTA(uint32_t now) {
   if (otaReady) {
     ArduinoOTA.handle();
   }
+#else
+  (void)now;
+#endif
 }
 
 } // namespace
@@ -506,7 +602,9 @@ void setup() {
   Serial.begin(115200);
   delay(200);
   // Attach Wi-Fi event logger early
+#if WIFI_MAIN_ENABLED
   WiFi.onEvent(onWiFiEvent);
+#endif
   FastLED.addLeds<WS2811, DATA_PIN, GRB>(leds, TOTAL_LEDS);
   FastLED.setBrightness(globalBrightness);
   clearZones();
@@ -514,9 +612,13 @@ void setup() {
   FastLED.show();
   printStatus();
   lastFrameMillis = millis();
+#if WIFI_MAIN_ENABLED
   if (attemptWiFiConnection()) {
     configureOTA();
   }
+#else
+  Serial.println(F("WiFi disabled; OTA features are offline."));
+#endif
 }
 
 void loop() {
